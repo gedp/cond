@@ -1,0 +1,651 @@
+{
+  "name": "Gestión Condominio AI (Pagos y Análisis) v2.3",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "condominium-assistant-whatsapp",
+        "options": {}
+      },
+      "name": "Webhook WhatsApp (Evolution API)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        100
+      ],
+      "webhookId": "condominium-assistant-whatsapp-v2-3",
+      "notes": "Disparador para recibir mensajes de WhatsApp vía Evolution API. Configura esta URL en tu instancia de Evolution API. \nEndpoint: {{ $execution.webhookUrl }}"
+    },
+    {
+      "parameters": {
+        "botToken": "={{ $credentials.telegramApi.botToken }}",
+        "updates": [
+          "message"
+        ],
+        "options": {}
+      },
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "notes": "Disparador para recibir mensajes de Telegram. Asegúrate de tener configuradas las credenciales 'telegramApi' con tu Bot Token."
+    },
+    {
+      "parameters": {
+        "functionCode": "const item = $input.item;\nlet senderId, platform, messageText, imageUrlOrFileId, originalPayload, messageType = 'unknown', apartmentNumber = null, rawMessage = {};\n\nif (item.json.body && item.json.body.data && item.json.body.data.key && item.json.body.data.key.remoteJid) { // Evolution API (WhatsApp)\n    platform = 'whatsapp';\n    senderId = item.json.body.data.key.remoteJid;\n    originalPayload = item.json.body.data;\n    rawMessage = item.json.body.data.message || {};\n\n    if (rawMessage.imageMessage) {\n        imageUrlOrFileId = rawMessage.imageMessage.url || `https://YOUR_EVOLUTION_API_INSTANCE/chat/getBase64File?msgId=${item.json.body.data.key.id}`; \n        messageText = rawMessage.imageMessage.caption || '';\n    } else if (rawMessage.extendedTextMessage) {\n        messageText = rawMessage.extendedTextMessage.text || '';\n    } else if (rawMessage.conversation) {\n        messageText = rawMessage.conversation || '';\n    } else {\n        messageText = '';\n    }\n\n} else if (item.json.message) { // Telegram\n    platform = 'telegram';\n    senderId = item.json.message.from.id.toString();\n    originalPayload = item.json.message;\n    rawMessage = item.json.message;\n    messageText = rawMessage.text || rawMessage.caption || '';\n\n    let fileId = null;\n    if (rawMessage.photo && rawMessage.photo.length > 0) {\n        fileId = rawMessage.photo[rawMessage.photo.length - 1].file_id;\n    } else if (rawMessage.document && rawMessage.document.mime_type && rawMessage.document.mime_type.startsWith('image')) {\n        fileId = rawMessage.document.file_id;\n    }\n    imageUrlOrFileId = fileId;\n} else {\n    return [{\n        json: {\n            error: \"Webhook no reconocido o formato inesperado.\",\n            platform: 'unknown',\n            senderId: 'unknown',\n            originalPayload: { error_source: 'Webhook', input: JSON.stringify(item.json).substring(0, 200) },\n            messageType: 'system_error',\n            responseText: \"Error: No se pudo procesar el mensaje entrante (formato desconocido). Por favor, contacte al administrador.\",\n            responseType: \"text_message\"\n        }\n    }];\n}\n\nconst aptRegex = /(?:apto|apartamento|ap|casa|local|oficina|vivienda)\\s*([a-zA-Z0-9\\s\\-]+(?:\\(?[PH|Piso|Torre|Etapa|Manzana|Mz\\.?\\s*\\d+\\)?)?)/i;\nconst aptMatch = messageText.match(aptRegex);\nif (aptMatch && aptMatch[1]) {\n    apartmentNumber = aptMatch[1].trim().toUpperCase();\n}\n\nif (imageUrlOrFileId && apartmentNumber) {\n    messageType = 'payment_ingest';\n} else if (messageText.trim().length > 0) {\n    messageType = 'data_query';\n} else {\n    messageType = 'unknown_type'; \n}\n\nreturn [{\n    json: {\n        senderId: senderId,\n        platform: platform,\n        messageText: messageText.trim(),\n        imageUrlOrFileId: imageUrlOrFileId, \n        apartmentNumber: apartmentNumber,\n        originalPayload: originalPayload, \n        messageType: messageType,\n        timestamp: new Date().toISOString()\n    }\n}];\n"
+      },
+      "name": "1. Unificar Datos y Determinar Tipo",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        200
+      ],
+      "notes": "Normaliza entrada, extrae datos clave. `imageUrlOrFileId` contiene URL (WA) o file_id (TG).\nManeja errores de formato de webhook."
+    },
+    {
+      "parameters": {
+        "value": "={{ $json.messageType }}",
+        "rules": {
+          "rules": [
+            {
+              "value": "payment_ingest",
+              "operator": "equals"
+            },
+            {
+              "value": "data_query",
+              "operator": "equals"
+            },
+            {
+              "value": "system_error",
+              "operator": "equals"
+            }
+          ]
+        }
+      },
+      "name": "2. Bifurcar por Tipo de Mensaje",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        750,
+        200
+      ],
+      "notes": "0: payment_ingest, 1: data_query, 2: system_error (ya tiene responseText), Default(3): unknown_type (se maneja después)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "value1": "={{ $json.platform }}",
+              "value2": "whatsapp",
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "3A.0 IF Platform is WhatsApp (Ingest)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.imageUrlOrFileId }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": false,
+              "format": "file"
+            }
+          }
+        },
+        "conditions": {
+          "conditions": [
+            {
+              "boolean": "={{ $json.imageUrlOrFileId !== null && typeof $json.imageUrlOrFileId === 'string' && $json.imageUrlOrFileId.startsWith('http') }}"
+            }
+          ]
+        }
+      },
+      "name": "3A.1 Descargar Imagen (WhatsApp)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        1250,
+        -150
+      ],
+      "notes": "Descarga imagen de WhatsApp SI `imageUrlOrFileId` es una URL HTTP(S).\n**IMPORTANTE**: Evolution API puede requerir autenticación. Ajusta la URL en el nodo '1. Unificar...'."
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "binary": [
+            {
+              "name": "receiptImage",
+              "value": "={{ $binary.data }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "3A.2 Set WhatsApp Image Binary",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1.2,
+      "position": [
+        1500,
+        -150
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "botToken": "={{ $credentials.telegramApi.botToken }}",
+        "operation": "getFile",
+        "fileId": "={{ $json.imageUrlOrFileId }}",
+        "options": {
+          "download": true
+        },
+        "conditions": {
+          "conditions": [
+            {
+              "boolean": "={{ $json.imageUrlOrFileId !== null && typeof $json.imageUrlOrFileId === 'string' && !$json.imageUrlOrFileId.startsWith('http') }}"
+            }
+          ]
+        }
+      },
+      "name": "3A.1 Descargar Imagen (Telegram)",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        1250,
+        -50
+      ],
+      "notes": "Descarga imagen de Telegram usando file_id. Credenciales: 'telegramApi'."
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "binary": [
+            {
+              "name": "receiptImage",
+              "value": "={{ $binary.data }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "3A.2 Set Telegram Image Binary",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1.2,
+      "position": [
+        1500,
+        -50
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "merge",
+        "options": {
+          "multiKey": "items"
+        }
+      },
+      "name": "3A.3 Merge Image Binary",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [
+        1750,
+        -100
+      ],
+      "notes": "Unifica la salida binaria de la imagen descargada. Espera un solo item con el binario."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "boolean": "={{ $binary.receiptImage !== null && $binary.receiptImage !== undefined }}"
+            }
+          ]
+        }
+      },
+      "name": "3A.4 IF Image Exists",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1850,
+        -100
+      ],
+      "notes": "Verifica si se pudo descargar una imagen antes de enviarla al LLM."
+    },
+    {
+      "parameters": {
+        "model": "gemini-1.5-flash-latest",
+        "authentication": "apiKey",
+        "apiKey": "={{ $credentials.googleGeminiApi.apiKey }}",
+        "jsonInput": true,
+        "prompt": "Analiza la imagen del recibo de pago de condominio adjunta. Extrae la siguiente información con la mayor precisión posible:\n1. `monto_pagado`: El monto numérico total del pago. Extrae solo números y el punto decimal si existe (ej. 1500.50). Si hay múltiples montos, intenta identificar el total principal. Si no se encuentra, usa 0.\n2. `fecha_pago`: La fecha en que se realizó el pago, en formato<y_bin_46>MM-DD. Si el año no está presente, intenta inferirlo o usa 'N/A'. Si el día o mes no son claros, intenta inferirlos o usa 'N/A'.\n3. `tipo_transaccion`: El método de pago. Clasifícalo como: 'Transferencia Bancaria', 'Pago Móvil', 'Zelle', 'Efectivo', 'Cheque', 'Tarjeta de Débito', 'Tarjeta de Crédito', 'Otro'. Si no es claro, usa 'N/A'.\n4. `numero_referencia`: (Opcional) El número de referencia de la transacción, si está visible y es claramente identificable. Si no, 'N/A'.\n\nResponde únicamente con un objeto JSON que contenga estos campos. Asegúrate de que el JSON sea válido.\n\nEjemplo de respuesta JSON:\n{\n  \"monto_pagado\": 125.30,\n  \"fecha_pago\": \"2024-07-15\",\n  \"tipo_transaccion\": \"Transferencia Bancaria\",\n  \"numero_referencia\": \"00123456789\"\n}\n\nConsidera que la imagen puede tener texto en español o spanglish. Presta atención a los detalles.",
+        "imageData": "={{ $binary.receiptImage }}",
+        "options": {
+          "responseFormat": "json_object"
+        }
+      },
+      "name": "4A. LLM - Extraer Datos de Recibo",
+      "type": "n8n-nodes-google.geminiChat",
+      "typeVersion": 1,
+      "position": [
+        2050,
+        -150
+      ],
+      "notes": "Usa Google Gemini Pro Vision para extraer datos del recibo. \nEntrada de imagen: `receiptImage` del nodo Merge.\nCredenciales: googleGeminiApi."
+    },
+    {
+      "parameters": {
+        "functionCode": "const llmNodeOutput = $('4A. LLM - Extraer Datos de Recibo').item ? $('4A. LLM - Extraer Datos de Recibo').item.json : null;\nconst llmOutput = llmNodeOutput ? llmNodeOutput.response : null; \nconst { apartmentNumber, senderId, platform, originalPayload } = $input.item.json;\n\nlet montoPagado = 0;\nlet fechaPago = 'N/A';\nlet tipoTransaccion = 'N/A';\nlet numeroReferencia = 'N/A';\n\nif (!llmOutput) { \n    return [{ json: { \n        responseText: 'Error: No se pudo obtener una respuesta del análisis de la imagen.', \n        senderId: senderId, platform: platform, originalPayload: originalPayload,\n        responseType: 'text_message'\n    }}];\n}\n\nif (llmOutput) {\n    if (typeof llmOutput.monto_pagado === 'string') {\n        const cleanedAmount = llmOutput.monto_pagado.replace(/[^0-9.,-]+/g, '').replace(',', '.');\n        montoPagado = parseFloat(cleanedAmount) || 0;\n    } else if (typeof llmOutput.monto_pagado === 'number'){\n        montoPagado = llmOutput.monto_pagado;\n    }\n    fechaPago = llmOutput.fecha_pago || 'N/A';\n    tipoTransaccion = llmOutput.tipo_transaccion || 'N/A';\n    numeroReferencia = llmOutput.numero_referencia || 'N/A';\n}\n\nif (montoPagado <= 0 && (tipoTransaccion === 'N/A' || tipoTransaccion === 'Otro')) { \n    return [{ json: { \n        responseText: '⚠️ No se pudieron extraer datos válidos del recibo (monto/tipo). Por favor, asegúrate que la imagen sea clara y el texto legible.', \n        llm_raw_extraction: JSON.stringify(llmOutput),\n        senderId: senderId, platform: platform, originalPayload: originalPayload,\n        responseType: 'text_message'\n    }}];\n}\n\nif (fechaPago !== 'N/A' && !/^\\d{4}-\\d{2}-\\d{2}$/.test(fechaPago)) {\n    console.warn(`Fecha extraída '${fechaPago}' no está en formato YYYY-MM-DD. Usando fecha actual.`);\n    fechaPago = new Date().toISOString().split('T')[0]; \n}\nif (fechaPago === 'N/A') {\n    console.warn(`Fecha extraída es 'N/A'. Usando fecha actual.`);\n    fechaPago = new Date().toISOString().split('T')[0];\n}\n\nconst paymentData = {\n    apartment_number: apartmentNumber,\n    paid_amount: montoPagado,\n    payment_date: fechaPago, \n    transaction_type: tipoTransaccion,\n    reference_number: numeroReferencia,\n    registration_date: new Date().toISOString(),\n    registered_by_platform: platform,\n    registered_by_sender: senderId,\n    llm_raw_extraction: JSON.stringify(llmOutput)\n};\n\nreturn [{\n    json: {\n        ...paymentData,\n        senderId: senderId, platform: platform, originalPayload: originalPayload,\n        apartment_number_display: apartmentNumber, \n        paid_amount_display: montoPagado.toFixed(2),\n        payment_date_display: fechaPago,\n        _intermediateType: 'ingest_parsed_success' \n    }\n}];\n"
+      },
+      "name": "5A. Parsear y Validar Datos (Ingesta)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2250,
+        -150
+      ],
+      "notes": "Parsea JSON del LLM, valida, añade datos. Si no hay imagen o datos útiles, devuelve `responseText` para error."
+    },
+    {
+      "parameters": {
+        "keepOnlySet": true,
+        "values": {
+          "string": [
+            {"name": "responseText", "value": "Error: No se pudo descargar o encontrar la imagen del recibo. Por favor, inténtalo de nuevo."},
+            {"name": "responseType", "value": "text_message"}
+          ]
+        },
+        "options": {}
+      },
+      "name": "Set Error No Image (Ingest)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1.2,
+      "position": [
+        2050,
+        -50
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "value1": "={{ $json._intermediateType }}",
+              "value2": "ingest_parsed_success",
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "IF Ingest Parsed OK",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2450,
+        -150
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "condo_payments",
+        "schema": "public",
+        "columns": [
+          {"column": "apartment_number", "expression": "={{ $json.apartment_number }}"},
+          {"column": "paid_amount", "expression": "={{ $json.paid_amount }}"},
+          {"column": "payment_date", "expression": "={{ $json.payment_date }}"},
+          {"column": "transaction_type", "expression": "={{ $json.transaction_type }}"},
+          {"column": "reference_number", "expression": "={{ $json.reference_number }}"},
+          {"column": "registration_date", "expression": "={{ $json.registration_date }}"},
+          {"column": "registered_by_platform", "expression": "={{ $json.registered_by_platform }}"},
+          {"column": "registered_by_sender", "expression": "={{ $json.registered_by_sender }}"},
+          {"column": "llm_raw_extraction", "expression": "={{ $json.llm_raw_extraction }}"}
+        ],
+        "options": {}
+      },
+      "name": "6A. Guardar Pago en DB",
+      "type": "n8n-nodes-base.postgreSql",
+      "typeVersion": 1,
+      "position": [
+        2650,
+        -200
+      ],
+      "credentials": {"postgreSql": {"id": "YOUR_POSTGRES_CREDENTIALS_ID", "name": "PostgreSQL condo DB"}},
+      "notes": "Guarda datos en PostgreSQL. Tabla: `condo_payments`. Configura credenciales y asegúrate que la tabla exista."
+    },
+    {
+      "parameters": {
+        "functionCode": "const { apartment_number_display, paid_amount_display, payment_date_display, transaction_type, reference_number } = $input.item.json;\nlet responseText = `¡Gracias! ✅ Tu pago de $${paid_amount_display} para el apto/casa '${apartment_number_display}' con fecha ${payment_date_display} (Tipo: ${transaction_type || 'N/E'}) ha sido registrado. Ref: ${reference_number && reference_number !== 'N/A' ? reference_number : 'N/E'}.`;\n\n// Si el nodo de DB tuvo un error (n8n lo manejaría deteniendo el flujo, pero por si acaso)\nconst dbNode = $('6A. Guardar Pago en DB');\nif (dbNode.error) {\n    responseText = '⚠️ Hubo un problema al guardar tu pago en la base de datos. Por favor, contacta al administrador.';\n}\n\nreturn [{ json: { responseText, responseType: 'text_message' } }];\n"
+      },
+      "name": "7A. Set Confirmación/Error DB Ingesta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2850,
+        -200
+      ],
+      "notes": "Prepara el mensaje final para la ingesta."
+    },
+    {
+      "parameters": {
+        "model": "gemini-1.5-flash-latest",
+        "authentication": "apiKey",
+        "apiKey": "={{ $credentials.googleGeminiApi.apiKey }}",
+        "jsonInput": true,
+        "prompt": "Eres un asistente IA de análisis de datos para la administración de un condominio. Tu tarea es interpretar las solicitudes de los usuarios y extraer la intención principal y los parámetros necesarios para generar informes o gráficos. Responde SIEMPRE con un objeto JSON válido.\n\nIntenciones posibles:\n1. `listar_pagos`: Para listar los pagos registrados.\n   - Parámetros:\n     - `apartamento`: (Opcional) El número del apartamento (ej. \"3B\", \"10A\", \"todos\"). Default: \"todos\".\n     - `periodo`: (Opcional) Rango de fechas: \"mes_actual\", \"mes_anterior\", \"ultimos_7_dias\", \"ultimos_30_dias\", \"ultimos_3_meses\", \"año_actual\", \"todo\", o un mes específico (ej. \"enero 2023\", \"01/2023\"). Default: \"mes_actual\".\n     - `tipo_transaccion`: (Opcional) Filtrar por tipo de transacción.\n2. `balance_general`: Para mostrar el total de ingresos y opcionalmente el número de pagos.\n   - Parámetros:\n     - `periodo`: (Opcional) Similar a `listar_pagos`. Default: \"todo\".\n3. `generar_grafico`:\n   - Parámetros:\n     - `tipo_grafico`: ('barras', 'lineas', 'torta'). Obligatorio.\n     - `datos_a_graficar`: ('ingresos_por_mes', 'ingresos_por_dia', 'ingresos_por_apartamento', 'ingresos_por_tipo_transaccion', 'conteo_pagos_por_mes'). Obligatorio.\n     - `periodo`: (Opcional) Similar a `listar_pagos`. Default: \"mes_actual\".\n     - `apartamento`: (Opcional) Para filtrar datos de un apartamento específico.\n4. `saludar_o_ayuda`: Si el usuario saluda o pide ayuda general.\n5. `desconocido`: Si la solicitud no se puede interpretar.\n\nEjemplos:\n- Usuario: \"Pagos del apto 5C del mes pasado\"\n  JSON: `{ \"intencion\": \"listar_pagos\", \"parametros\": { \"apartamento\": \"5C\", \"periodo\": \"mes_anterior\" } }`\n- Usuario: \"Balance general del condominio\"\n  JSON: `{ \"intencion\": \"balance_general\", \"parametros\": { \"periodo\": \"todo\" } }`\n- Usuario: \"Gráfico de torta de ingresos por tipo de transacción de este año\"\n  JSON: `{ \"intencion\": \"generar_grafico\", \"parametros\": { \"tipo_grafico\": \"torta\", \"datos_a_graficar\": \"ingresos_por_tipo_transaccion\", \"periodo\": \"año_actual\" } }`\n- Usuario: \"Hola\"\n  JSON: `{ \"intencion\": \"saludar_o_ayuda\", \"parametros\": {} }`\n\nSi la solicitud no es clara, devuelve `desconocido`. Prioriza `listar_pagos` o `generar_grafico` si hay detalle.\nTexto del usuario: \"{{ $json.messageText }}\"",
+        "options": {"responseFormat": "json_object"}
+      },
+      "name": "3B. LLM - Interpretar Solicitud de Datos",
+      "type": "n8n-nodes-google.geminiChat",
+      "typeVersion": 1,
+      "position": [1000, 350],
+      "notes": "Interpreta la solicitud del usuario. Credenciales: googleGeminiApi"
+    },
+    {
+      "parameters": {
+        "functionCode": "const llmNodeOutput = $('3B. LLM - Interpretar Solicitud de Datos').item ? $('3B. LLM - Interpretar Solicitud de Datos').item.json : null;\nconst llmResponse = llmNodeOutput ? llmNodeOutput.response : null; \nlet intencion = 'desconocido';\nlet parametros = {};\n\nif (llmResponse && llmResponse.intencion) {\n    intencion = llmResponse.intencion;\n    parametros = llmResponse.parametros || {};\n} else { \n    console.error(\"Respuesta inesperada del LLM interpretador de consultas:\", llmResponse);\n    intencion = 'desconocido'; \n}\n\nif (parametros.periodo) {\n    parametros.periodo = parametros.periodo.toLowerCase();\n    if (['este mes', 'mes corriente'].includes(parametros.periodo)) parametros.periodo = 'mes_actual';\n    if (['mes pasado', 'mes anterior'].includes(parametros.periodo)) parametros.periodo = 'mes_anterior';\n}\n\nif (parametros.apartamento) {\n  parametros.apartamento = parametros.apartamento.toUpperCase();\n  if (['TODO', 'TODOS', 'GENERAL', 'GLOBAL'].includes(parametros.apartamento)) {\n    parametros.apartamento = 'TODOS';\n  }\n}\nreturn [{json: {\n    intencion,\n    parametros,\n    senderId: $input.item.json.senderId,\n    platform: $input.item.json.platform,\n    originalPayload: $input.item.json.originalPayload,\n    messageText: $input.item.json.messageText\n}}];"
+      },
+      "name": "4B. Parsear Intención y Parámetros",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1250, 350],
+      "notes": "Extrae y normaliza intención/parámetros del LLM."
+    },
+    {
+      "parameters": {
+        "value": "={{ $json.intencion }}",
+        "rules": {
+          "rules": [
+            {"value": "listar_pagos", "operator": "equals"},
+            {"value": "balance_general", "operator": "equals"},
+            {"value": "generar_grafico", "operator": "equals"},
+            {"value": "saludar_o_ayuda", "operator": "equals"}
+          ]
+        }
+      },
+      "name": "5B. Bifurcar por Intención de Consulta",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [1500, 350],
+      "notes": "0: listar_pagos, 1: balance, 2: grafico, 3: ayuda, Default(4): desconocido"
+    },
+    {"parameters": {"functionCode": "const params = $input.item.json.parametros;\nlet condiciones = []; let queryParams = [];\nlet dateColumn = 'payment_date'; const now = new Date();\nlet startDate, endDate;\nlet periodoText = params.periodo || 'mes_actual';\nswitch (periodoText) {\n    case 'mes_actual': startDate = new Date(now.getFullYear(), now.getMonth(), 1,0,0,0,0); endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999); break;\n    case 'mes_anterior': startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1,0,0,0,0); endDate = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999); break;\n    case 'ultimos_7_dias': startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6,0,0,0,0); endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999); break;\n    case 'ultimos_30_dias': startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29,0,0,0,0); endDate = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999); break;\n    case 'ultimos_3_meses': startDate = new Date(now.getFullYear(), now.getMonth() - 2, 1,0,0,0,0); endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999); break;\n    case 'año_actual': startDate = new Date(now.getFullYear(), 0, 1,0,0,0,0); endDate = new Date(now.getFullYear(), 11, 31, 23, 59, 59, 999); break;\n    case 'todo': break;\n    default: const mY = periodoText.match(/(\\d{1,2})\\/?(\\d{4})/); const yO = periodoText.match(/^(\\d{4})$/); if(mY){const m=parseInt(mY[1])-1;const y=parseInt(mY[2]);if(!isNaN(m)&&!isNaN(y)){startDate=new Date(y,m,1,0,0,0,0);endDate=new Date(y,m+1,0,23,59,59,999);}}else if(yO){const y=parseInt(yO[1]);if(!isNaN(y)){startDate=new Date(y,0,1,0,0,0,0);endDate=new Date(y,11,31,23,59,59,999);}}break;\n}\nif (startDate && endDate) { condiciones.push(`${dateColumn} >= $${queryParams.length + 1} AND ${dateColumn} <= $${queryParams.length + 2}`); queryParams.push(startDate.toISOString().split('T')[0]); queryParams.push(endDate.toISOString().split('T')[0]); }\nif (params.apartamento && params.apartamento !== 'TODOS') { condiciones.push(`apartment_number ILIKE $${queryParams.length + 1}`); queryParams.push(`%${params.apartamento}%`); }\nif (params.tipo_transaccion) { condiciones.push(`transaction_type ILIKE $${queryParams.length + 1}`); queryParams.push(`%${params.tipo_transaccion}%`); }\nlet whereClause = condiciones.length > 0 ? `WHERE ${condiciones.join(' AND ')}` : '';\nlet sqlQuery = `SELECT apartment_number, paid_amount, TO_CHAR(payment_date, 'YYYY-MM-DD') as payment_date_fmt, transaction_type, reference_number FROM condo_payments ${whereClause} ORDER BY payment_date DESC, registration_date DESC, apartment_number ASC LIMIT 50;`;\nreturn [{ json: { sqlQuery, queryParams, periodoSolicitado: periodoText, aptoSolicitado: params.apartamento || 'Todos'} }];"}, "name": "6B.1 Construir Query (Listar Pagos)", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1750, 180]},
+    {"parameters": {"operation": "executeQuery", "query": "={{ $json.sqlQuery }}", "values": "={{ $json.queryParams }}", "options": {}}, "name": "6B.2 DB - Leer Pagos (Listar)", "type": "n8n-nodes-base.postgreSql", "typeVersion": 1, "position": [2000, 180], "credentials": {"postgreSql": {"id": "YOUR_POSTGRES_CREDENTIALS_ID", "name": "PostgreSQL condo DB"}}},
+    {"parameters": {"functionCode": "const payments = $input.item.json.data;\nconst { periodoSolicitado, aptoSolicitado } = $input.item.json;\nlet responseText = ``;\nif (payments && payments.length > 0) {\n    responseText = `Pagos (Apto: ${aptoSolicitado}, Periodo: ${periodoSolicitado}):\\n`;\n    responseText += '`---------------------------------------------------`\\n';\n    responseText += '`| Apto.  | Monto    | Fecha      | Tipo             | Ref.   |`\\n';\n    responseText += '`|--------|----------|------------|------------------|--------|`\\n';\n    payments.forEach(p => {\n        const apt = (p.apartment_number || 'N/A').substring(0,6).padEnd(6);\n        const monto = (`$` + (parseFloat(p.paid_amount) || 0).toFixed(2)).padEnd(8);\n        const fecha = (p.payment_date_fmt || 'N/A').padEnd(10);\n        const tipo = (p.transaction_type || 'N/A').substring(0,16).padEnd(16);\n        const ref = (p.reference_number || 'N/A').substring(0,6).padEnd(6);\n        responseText += '`| ' + apt + ' | ' + monto + ' | ' + fecha + ' | ' + tipo + ' | ' + ref + ' |`\\n';\n    });\n    responseText += '`---------------------------------------------------`\\n';\n    if (payments.length >= 50) responseText += \"\\n_(Mostrando hasta 50 regs. Refina tu búsqueda.)_\";\n} else { responseText = `No se encontraron pagos para Apto: ${aptoSolicitado}, Periodo: ${periodoSolicitado}.`; }\nreturn [{ json: { responseText, responseType: 'text_message' } }];"}, "name": "6B.3 Generar Tabla Texto (Listar Pagos)", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [2250, 180]},
+    {"parameters": {"functionCode": "const params = $input.item.json.parametros;\nlet condiciones = []; let queryParams = []; let dateColumn = 'payment_date'; const now = new Date();\nlet startDate, endDate;\nlet periodoText = params.periodo || 'todo';\nswitch (periodoText) {\n    case 'mes_actual': startDate = new Date(now.getFullYear(), now.getMonth(), 1,0,0,0,0); endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23,59,59,999); break;\n    case 'mes_anterior': startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1,0,0,0,0); endDate = new Date(now.getFullYear(), now.getMonth(), 0, 23,59,59,999); break;\n    case 'año_actual': startDate = new Date(now.getFullYear(), 0, 1,0,0,0,0); endDate = new Date(now.getFullYear(), 11, 31, 23,59,59,999); break;\n    case 'todo': break; \n    default: const mY=periodoText.match(/(\\d{1,2})\\/?(\\d{4})/);if(mY){const m=parseInt(mY[1])-1;const y=parseInt(mY[2]);if(!isNaN(m)&&!isNaN(y)){startDate=new Date(y,m,1,0,0,0,0);endDate=new Date(y,m+1,0,23,59,59,999);}}break;\n}\nif (startDate && endDate) { condiciones.push(`${dateColumn} >= $${queryParams.length + 1} AND ${dateColumn} <= $${queryParams.length + 2}`); queryParams.push(startDate.toISOString().split('T')[0]); queryParams.push(endDate.toISOString().split('T')[0]); }\nlet whereClause = condiciones.length > 0 ? `WHERE ${condiciones.join(' AND ')}` : '';\nconst sqlQuery = `SELECT SUM(paid_amount) as total_paid, COUNT(*) as number_of_payments FROM condo_payments ${whereClause};`;\nreturn [{ json: { sqlQuery, queryParams, periodoSolicitado: periodoText } }];"}, "name": "6C.1 Construir Query (Balance)", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1750, 300]},
+    {"parameters": {"operation": "executeQuery", "query": "={{ $json.sqlQuery }}", "values": "={{ $json.queryParams }}", "options": {}}, "name": "6C.2 DB - Calcular Balance", "type": "n8n-nodes-base.postgreSql", "typeVersion": 1, "position": [2000, 300], "credentials": {"postgreSql": {"id": "YOUR_POSTGRES_CREDENTIALS_ID", "name": "PostgreSQL condo DB"}}},
+    {"parameters": {"functionCode": "const result = $input.item.json.data[0];\nconst totalPaid = result && result.total_paid !== null ? parseFloat(result.total_paid) : 0;\nconst numPayments = result && result.number_of_payments !== null ? parseInt(result.number_of_payments) : 0;\nconst periodo = $input.item.json.periodoSolicitado;\nconst responseText = `Balance General (Periodo: ${periodo}):\\n- Total Ingresado: $${totalPaid.toFixed(2)}\\n- Nro. Pagos: ${numPayments}`;\nreturn [{ json: { responseText, responseType: 'text_message' } }];"}, "name": "6C.3 Formatear Balance", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [2250, 300]},
+    {"parameters": {"functionCode": "const params = $input.item.json.parametros;\nlet sqlQuery = ''; let queryParams = []; const now = new Date();\nlet startDate, endDate; let dateColumn = 'payment_date';\nlet periodoText = params.periodo || 'mes_actual';\nswitch (periodoText) {\n    case 'mes_actual': startDate = new Date(now.getFullYear(), now.getMonth(), 1,0,0,0,0); endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0,23,59,59,999); break;\n    case 'mes_anterior': startDate = new Date(now.getFullYear(), now.getMonth() - 1, 1,0,0,0,0); endDate = new Date(now.getFullYear(), now.getMonth(), 0,23,59,59,999); break;\n    case 'ultimos_7_dias': startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6,0,0,0,0); endDate = new Date(now.getFullYear(),now.getMonth(),now.getDate(),23,59,59,999); break;\n    case 'ultimos_30_dias': startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 29,0,0,0,0); endDate = new Date(now.getFullYear(),now.getMonth(),now.getDate(),23,59,59,999); break;\n    case 'ultimos_3_meses': startDate = new Date(now.getFullYear(), now.getMonth() -2, 1,0,0,0,0); endDate = new Date(now.getFullYear(), now.getMonth() + 1, 0,23,59,59,999); break;\n    case 'año_actual': startDate = new Date(now.getFullYear(), 0, 1,0,0,0,0); endDate = new Date(now.getFullYear(), 11, 31,23,59,59,999); break;\n    case 'todo': break;\n    default: const mY=periodoText.match(/(\\d{1,2})\\/?(\\d{4})/);if(mY){const m=parseInt(mY[1])-1;const y=parseInt(mY[2]);if(!isNaN(m)&&!isNaN(y)){startDate=new Date(y,m,1,0,0,0,0);endDate=new Date(y,m+1,0,23,59,59,999);}}break;\n}\nlet dateFilter = '';\nif (startDate && endDate) { dateFilter = (queryParams.length > 0 || aptFilter ? ' AND ' : 'WHERE ') + `${dateColumn} >= $${queryParams.length + 1} AND ${dateColumn} <= $${queryParams.length + 2}`; queryParams.push(startDate.toISOString().split('T')[0]); queryParams.push(endDate.toISOString().split('T')[0]); }\nlet aptFilter = '';\nif (params.apartamento && params.apartamento !== 'TODOS') { aptFilter = (queryParams.length > 0 || dateFilter ? ' AND ' : 'WHERE ') + `apartment_number ILIKE $${queryParams.length + 1}`; queryParams.push(`%${params.apartamento}%`);}\nlet finalWhereClause = (dateFilter + aptFilter).trim();\nif (finalWhereClause.startsWith('AND')) { finalWhereClause = 'WHERE ' + finalWhereClause.substring(3).trim(); }\n\nlet groupBy = '', selectClause = '', orderBy = '';\nswitch (params.datos_a_graficar) {\n    case 'ingresos_por_mes': selectClause = `TO_CHAR(${dateColumn}, 'YYYY-MM') as label, SUM(paid_amount) as value`; groupBy = `GROUP BY TO_CHAR(${dateColumn}, 'YYYY-MM')`; orderBy = `ORDER BY label ASC`; if (periodoText === 'todo' && !finalWhereClause.includes(`${dateColumn} >=`)) { const tMA = new Date(now.getFullYear()-1,now.getMonth(),1,0,0,0,0); finalWhereClause = (finalWhereClause?finalWhereClause+' AND ':'WHERE ') + `${dateColumn} >= $${queryParams.length+1}`; queryParams.push(tMA.toISOString().split('T')[0]);} break;\n    case 'ingresos_por_dia': selectClause = `TO_CHAR(${dateColumn}, 'YYYY-MM-DD') as label, SUM(paid_amount) as value`; groupBy = `GROUP BY TO_CHAR(${dateColumn}, 'YYYY-MM-DD')`; orderBy = `ORDER BY label ASC`; if (periodoText === 'todo' && !finalWhereClause.includes(`${dateColumn} >=`)) { const tDA = new Date(now.getFullYear(),now.getMonth(),now.getDate()-29,0,0,0,0); finalWhereClause = (finalWhereClause?finalWhereClause+' AND ':'WHERE ') + `${dateColumn} >= $${queryParams.length+1}`; queryParams.push(tDA.toISOString().split('T')[0]);} break;\n    case 'ingresos_por_apartamento': selectClause = `COALESCE(apartment_number, 'N/Asignado') as label, SUM(paid_amount) as value`; groupBy = `GROUP BY COALESCE(apartment_number, 'N/Asignado')`; orderBy = `ORDER BY value DESC LIMIT 10`; break;\n    case 'ingresos_por_tipo_transaccion': selectClause = `COALESCE(transaction_type, 'N/Definido') as label, SUM(paid_amount) as value`; groupBy = `GROUP BY COALESCE(transaction_type, 'N/Definido')`; orderBy = `ORDER BY value DESC`; break;\n    case 'conteo_pagos_por_mes': selectClause = `TO_CHAR(${dateColumn}, 'YYYY-MM') as label, COUNT(*) as value`; groupBy = `GROUP BY TO_CHAR(${dateColumn}, 'YYYY-MM')`; orderBy = `ORDER BY label ASC`; if (periodoText === 'todo' && !finalWhereClause.includes(`${dateColumn} >=`)) { const tMA = new Date(now.getFullYear()-1,now.getMonth(),1,0,0,0,0); finalWhereClause = (finalWhereClause?finalWhereClause+' AND ':'WHERE ') + `${dateColumn} >= $${queryParams.length+1}`; queryParams.push(tMA.toISOString().split('T')[0]);} break;\n    default: return [{ json: { responseText: `Error: Tipo de datos para graficar '${params.datos_a_graficar}' no soportado.`, responseType: 'text_message' } }];\n}\nsqlQuery = `SELECT ${selectClause} FROM condo_payments ${finalWhereClause} ${groupBy} ${orderBy};`;\nreturn [{ json: { sqlQuery, queryParams, chartParams: params, periodoSolicitado: periodoText, aptoSolicitado: params.apartamento || 'Todos' } }];"}, "name": "6D.1 Construir Query (Gráfico)", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1750, 420]},
+    {"parameters": {}, "name": "6D.1.1 IF Query Gráfico OK", "type": "n8n-nodes-base.if", "typeVersion": 1, "position": [1880, 420]},
+    {"parameters": {"operation": "executeQuery", "query": "={{ $json.sqlQuery }}", "values": "={{ $json.queryParams }}", "options": {}}, "name": "6D.2 DB - Obtener Datos Gráfico", "type": "n8n-nodes-base.postgreSql", "typeVersion": 1, "position": [2000, 380], "credentials": {"postgreSql": {"id": "YOUR_POSTGRES_CREDENTIALS_ID", "name": "PostgreSQL condo DB"}}},
+    {"parameters": {"functionCode": "const chartParams = $input.item.json.chartParams;\nconst dbData = $input.item.json.data;\nconst { periodoSolicitado, aptoSolicitado } = $input.item.json;\n\nif (!dbData || dbData.length === 0) {\n    return [{ json: { responseText: `No hay datos suficientes para generar el gráfico '${chartParams.datos_a_graficar}' (Periodo: ${periodoSolicitado}, Apto: ${aptoSolicitado}).`, responseType: 'text_message' } }];\n}\n\nconst labels = dbData.map(d => d.label || 'N/A');\nconst dataValues = dbData.map(d => parseFloat(d.value) || 0);\nlet chartType = chartParams.tipo_grafico; if (chartType === 'torta') chartType = 'pie'; if (chartType === 'lineas') chartType = 'line'; if (chartType === 'barras') chartType = 'bar';\nconst bgColors = ['#4e79a7','#f28e2c','#e15759','#76b7b2','#59a14f','#edc949','#af7aa1','#ff9da7','#9c755f','#bab0ab'];\nconst chartConfig = {\n    type: chartType, data: { labels: labels, datasets: [{ label: chartParams.datos_a_graficar.replace(/_/g, ' '), data: dataValues, backgroundColor: chartType === 'line' ? 'rgba(75,192,192,0.2)' : bgColors.slice(0, dataValues.length), borderColor: chartType === 'line' ? 'rgba(75,192,192,1)' : bgColors.map(c=>c.replace('0.7','1')).slice(0, dataValues.length), borderWidth: chartType==='pie'?1:2, fill: chartType==='line' }] },\n    options: { responsive: true, plugins: { title: { display: true, text: `${chartParams.datos_a_graficar.replace(/_/g, ' ')} (P: ${periodoSolicitado}, A: ${aptoSolicitado})`, font: {size: 16}}, legend: {position: chartType==='pie'?'top':'bottom', display: dataValues.length <= 10 && dataValues.length > 1}}, scales: chartType!=='pie'?{y:{beginAtZero:true, ticks:{callback:v=>'$'+v}}, x:{ticks:{autoSkip:true,maxTicksLimit:labels.length>15?10:20}}}:undefined }\n};\nconst quickChartPayload = { chart: chartConfig, width: 600, height: 400, backgroundColor: 'white', format: 'png' };\nconst caption = `Gráfico: ${chartParams.datos_a_graficar.replace(/_/g, ' ')} (P: ${periodoSolicitado}, A: ${aptoSolicitado})`;\nreturn [{ json: { quickChartPayload, responseType: 'chart_image', imageCaption: caption } }];"}, "name": "6D.3 Formatear Datos QuickChart", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [2250, 380]},
+    {"parameters": {}, "name": "6D.3.1 IF Chart Payload OK", "type": "n8n-nodes-base.if", "typeVersion": 1, "position": [2380, 380]},
+    {"parameters": {"url": "https://quickchart.io/chart", "method": "POST", "bodyParameters": "={{ $json.quickChartPayload }}", "options": {"response": {"response": {"fullResponse": false, "format": "file"}}}}, "name": "6D.4 Generar Gráfico (QuickChart)", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.1, "position": [2500, 340]},
+    {"parameters": {"functionCode": "const msg = \"Hola 👋 Soy tu asistente de condominio.\\n\\nPara registrar un pago, envía una foto del recibo e indica el número de apartamento/casa (ej. 'Pago apto 3B').\\n\\nPara consultas, puedes pedirme:\\n- *Listar pagos*: 'Ver pagos apto 1A mes actual'\\n- *Balance general*: 'Cuál es el balance general?'\\n- *Gráficos*: 'Gráfico de barras ingresos por mes' (tipos: barras, lineas, torta; datos: ingresos_por_mes, ingresos_por_apartamento, etc.)\";\nreturn [{ json: { responseText: msg, responseType: 'text_message' } }];"}, "name": "6E. Mensaje Saludo/Ayuda", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1750, 540]},
+    {"parameters": {"functionCode": "const userInput = $input.item.json.messageText || ($input.item.json.originalPayload ? JSON.stringify($input.item.json.originalPayload).substring(0,70) : 'No se pudo obtener el mensaje original.');\nconst msg = `Lo siento, no entendí tu solicitud: \"${userInput.substring(0,50)}${userInput.length > 50 ? '...' : ''}\". \n\nIntenta con 'ayuda' para ver opciones.`;\nreturn [{ json: { responseText: msg, responseType: 'text_message' } }];"}, "name": "7B. Mensaje Intención No Reconocida", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1750, 660]},
+    {"parameters": {"functionCode": "const msg = `Lo siento, no pude procesar tu mensaje. Para registrar un pago, envía la imagen del recibo y el número de apartamento (ej. 'apto 3B'). Para consultas, escribe 'ayuda'.`;\nreturn [{ json: { responseText: msg, responseType: 'text_message' } }];"}, "name": "Set Unknown Type Message", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1000, 100]},
+    {
+      "parameters": {
+        "options": {
+          "mode": "mergeItems"
+        }
+      },
+      "name": "Merge All Response Paths",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [
+        3000,
+        200
+      ],
+      "notes": "Unifica todas las ramas de respuesta antes del envío final."
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $items();\nlet outputItem = { json: { responseType: 'unknown_final' } };\n\n// Prioritize the first valid item that has a responseType and necessary data\nfor (const item of items) {\n    const currentJson = item.json || {};\n    const currentBinary = item.binary || {};\n\n    if (currentJson.responseType === 'text_message' && currentJson.responseText) {\n        outputItem.json = {\n            responseText: currentJson.responseText,\n            responseType: 'text_message',\n            senderId: currentJson.senderId || ($input.item.json.senderId), // Fallback to initial senderId\n            platform: currentJson.platform || ($input.item.json.platform),\n            originalPayload: currentJson.originalPayload || ($input.item.json.originalPayload)\n        };\n        break;\n    } else if (currentJson.responseType === 'chart_image' && currentBinary.data) { // From QuickChart\n        outputItem.json = {\n            responseType: 'image_message',\n            imageCaption: currentJson.imageCaption || 'Gráfico Solicitado',\n            senderId: currentJson.senderId || ($input.item.json.senderId),\n            platform: currentJson.platform || ($input.item.json.platform),\n            originalPayload: currentJson.originalPayload || ($input.item.json.originalPayload)\n        };\n        // CRITICAL: Prepare binary data for sending. Evolution API might need base64.\n        // N8N's binary data from HTTP Request (file format) is typically a Buffer.\n        const imageBuffer = Buffer.isBuffer(currentBinary.data) ? currentBinary.data : Buffer.from(currentBinary.data);\n        outputItem.binary = { \n            finalImage: { \n                data: currentBinary.data, // Keep raw buffer for Telegram\n                base64: imageBuffer.toString('base64'), // For Evolution API if needed\n                fileName: currentBinary.fileName || 'grafico.png',\n                mimeType: currentBinary.mimeType || 'image/png'\n            }\n        }; \n        break;\n    }\n}\n\n// If no specific response was prepared, but we have initial sender info, send a generic error.\nif (outputItem.json.responseType === 'unknown_final' && $input.item.json && $input.item.json.senderId) {\n    outputItem.json = {\n        responseText: \"Lo siento, ocurrió un error inesperado al procesar tu solicitud.\",\n        responseType: 'text_message',\n        senderId: $input.item.json.senderId,\n        platform: $input.item.json.platform,\n        originalPayload: $input.item.json.originalPayload\n    };\n}\n\n// Ensure essential fields for sending are present if a response is to be sent.\nif (outputItem.json.responseType !== 'unknown_final' && !outputItem.json.senderId && items.length > 0 && items[0].json && items[0].json.senderId) {\n    // Try to get sender info from the first item if not set by the specific response branch\n    const firstItemJson = items[0].json;\n    outputItem.json.senderId = firstItemJson.senderId;\n    outputItem.json.platform = firstItemJson.platform;\n    outputItem.json.originalPayload = firstItemJson.originalPayload;\n}\n\nif (!outputItem.json.senderId || outputItem.json.responseType === 'unknown_final') {\n    console.error(\"Prepare Final Response: No senderId or unknown response type. Cannot send message.\", JSON.stringify(outputItem));\n    return []; // Don't send anything if critical info is missing\n}\n\nreturn [outputItem];\n"
+      },
+      "name": "Prepare Final Response Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3250,
+        200
+      ],
+      "notes": "Prepara los datos del item unificado para el switch de envío final. Incluye conversión a Base64 para imagen."
+    },
+    {
+      "parameters": {
+        "value": "={{ $json.responseType }}",
+        "rules": {
+          "rules": [
+            {
+              "value": "text_message",
+              "operator": "equals"
+            },
+            {
+              "value": "image_message",
+              "operator": "equals"
+            }
+          ]
+        }
+      },
+      "name": "Switch Response Type (Final)",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        3500,
+        200
+      ],
+      "notes": "0: Enviar texto, 1: Enviar imagen, Default (2): No hacer nada"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "value1": "={{ $json.platform }}",
+              "value2": "whatsapp",
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "IF WhatsApp (Text)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        3750,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://YOUR_EVOLUTION_API_INSTANCE/message/sendText/YOUR_INSTANCE_NAME",
+        "method": "POST",
+        "authentication": "headerAuth",
+        "headerAuth": {"name": "apikey", "value": "YOUR_EVOLUTION_API_KEY"},
+        "bodyParameters": {
+          "parameters": [
+            {"name": "number", "value": "={{ $json.senderId.split('@')[0] }}"},
+            {"name": "options", "value": "{\n \"delay\": 1000,\n \"presence\": \"composing\"\n}"},
+            {"name": "textMessage", "value": "={{ { \"text\": $json.responseText.substring(0, 4096) } }}"}
+          ]
+        },
+        "options": {"retryOnFail":true, "retryCount":1}
+      },
+      "name": "Send WhatsApp Text",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        4000,
+        50
+      ],
+      "notes": "**Reemplaza URL y API Key de Evolution API!** Texto limitado a 4096 chars."
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.originalPayload.chat.id }}",
+        "text": "={{ $json.responseText.substring(0, 4096) }}",
+        "options": {"parseMode": "Markdown"}
+      },
+      "name": "Send Telegram Text",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        4000,
+        150
+      ],
+      "credentials": {"telegramApi": {"id": "YOUR_TELEGRAM_CREDENTIALS_ID", "name": "Telegram Bot"}}
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "conditions": [
+            {
+              "value1": "={{ $json.platform }}",
+              "value2": "whatsapp",
+              "operation": "equal"
+            }
+          ]
+        }
+      },
+      "name": "IF WhatsApp (Image)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        3750,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://YOUR_EVOLUTION_API_INSTANCE/message/sendMedia/YOUR_INSTANCE_NAME",
+        "method": "POST",
+        "authentication": "headerAuth",
+        "headerAuth": {"name": "apikey", "value": "YOUR_EVOLUTION_API_KEY"},
+        "sendBody": true,
+        "contentType": "application/json",
+        "bodyParameters": "={{ { \n  \"number\": $json.senderId.split('@')[0],\n  \"mediaMessage\": {\n    \"mediatype\": \"image\",\n    \"caption\": $json.imageCaption.substring(0,1024),\n    \"media\": $binary.finalImage.base64, \n    \"fileName\": $binary.finalImage.fileName || \"grafico_condominio.png\"\n  },\n  \"options\": {\n    \"delay\": 1200,\n    \"presence\": \"composing\"\n  }\n} }}",
+        "options": {"retryOnFail":true, "retryCount":1}
+      },
+      "name": "Send WhatsApp Image",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [
+        4000,
+        250
+      ],
+      "notes": "**Reemplaza URL y API Key de Evolution API!** \nVerifica el formato exacto que tu Evolution API espera para enviar imágenes (ej. `media` con base64). Asegúrate que `$binary.finalImage.base64` esté disponible (convertido en 'Prepare Final Response Data')."
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.originalPayload.chat.id }}",
+        "file": "={{ $binary.finalImage.fileName || 'grafico.png' }}",
+        "fileData": "={{ $binary.finalImage.data }}",
+        "options": {"caption": "={{ $json.imageCaption.substring(0,1024) }}"}
+      },
+      "name": "Send Telegram Image",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        4000,
+        350
+      ],
+      "credentials": {"telegramApi": {"id": "YOUR_TELEGRAM_CREDENTIALS_ID", "name": "Telegram Bot"}}
+    }
+  ],
+"connections": {
+    "Webhook WhatsApp (Evolution API)": {"main": [[{"node": "1. Unificar Datos y Determinar Tipo", "type": "main", "index": 0}]]},
+    "Telegram Trigger": {"main": [[{"node": "1. Unificar Datos y Determinar Tipo", "type": "main", "index": 0}]]},
+    "1. Unificar Datos y Determinar Tipo": {"main": [[{"node": "2. Bifurcar por Tipo de Mensaje", "type": "main", "index": 0}]]},
+    "2. Bifurcar por Tipo de Mensaje": {
+      "main": [
+        [{"node": "3A.0 IF Platform is WhatsApp (Ingest)", "type": "main", "index": 0}],
+        [{"node": "3B. LLM - Interpretar Solicitud de Datos", "type": "main", "index": 0}],
+        [{"node": "Merge All Response Paths", "type": "main", "index": 0}],
+        [{"node": "Set Unknown Type Message", "type": "main", "index": 0}] 
+      ]
+    },
+    "Set Unknown Type Message": {"main": [[{"node": "Merge All Response Paths", "type": "main", "index": 1}]]},
+
+    "3A.0 IF Platform is WhatsApp (Ingest)": { "main": [ [{"node": "3A.1 Descargar Imagen (WhatsApp)", "type": "main", "index": 0}], [{"node": "3A.1 Descargar Imagen (Telegram)", "type": "main", "index": 0}] ]},
+    "3A.1 Descargar Imagen (WhatsApp)": {"main": [[{"node": "3A.2 Set WhatsApp Image Binary", "type": "main", "index": 0}]]},
+    "3A.2 Set WhatsApp Image Binary": {"main": [[{"node": "3A.3 Merge Image Binary", "type": "main", "index": 0}]]},
+    "3A.1 Descargar Imagen (Telegram)": {"main": [[{"node": "3A.2 Set Telegram Image Binary", "type": "main", "index": 0}]]},
+    "3A.2 Set Telegram Image Binary": {"main": [[{"node": "3A.3 Merge Image Binary", "type": "main", "index": 0}]]},
+    "3A.3 Merge Image Binary": {"main": [[{"node": "3A.4 IF Image Exists", "type": "main", "index": 0}]]},
+    "3A.4 IF Image Exists": { "main": [ [{"node": "4A. LLM - Extraer Datos de Recibo", "type": "main", "index": 0}], [{"node": "Set Error No Image (Ingest)", "type": "main", "index": 0}] ]},
+    "4A. LLM - Extraer Datos de Recibo": {"main": [[{"node": "5A. Parsear y Validar Datos (Ingesta)", "type": "main", "index": 0}]]},
+    "Set Error No Image (Ingest)": {"main": [[{"node": "Merge All Response Paths", "type": "main", "index": 2}]]},
+    "5A. Parsear y Validar Datos (Ingesta)": {"main": [[{"node": "IF Ingest Parsed OK", "type": "main", "index": 0}]]},
+    "IF Ingest Parsed OK": { "main": [ [{"node": "6A. Guardar Pago en DB", "type": "main", "index": 0}], [{"node": "Merge All Response Paths", "type": "main", "index": 3}] ]},
+    "6A. Guardar Pago en DB": {"main": [[{"node": "7A. Set Confirmación/Error DB Ingesta", "type": "main", "index": 0}]]},
+    "7A. Set Confirmación/Error DB Ingesta": {"main": [[{"node": "Merge All Response Paths", "type": "main", "index": 4}]]},
+    
+    "3B. LLM - Interpretar Solicitud de Datos": {"main": [[{"node": "4B. Parsear Intención y Parámetros", "type": "main", "index": 0}]]},
+    "4B. Parsear Intención y Parámetros": {"main": [[{"node": "5B. Bifurcar por Intención de Consulta", "type": "main", "index": 0}]]},
+    "5B. Bifurcar por Intención de Consulta": {
+      "main": [
+        [{"node": "6B.1 Construir Query (Listar Pagos)", "type": "main", "index": 0}], 
+        [{"node": "6C.1 Construir Query (Balance)", "type": "main", "index": 0}],    
+        [{"node": "6D.1 Construir Query (Gráfico)", "type": "main", "index": 0}],   
+        [{"node": "6E. Mensaje Saludo/Ayuda", "type": "main", "index": 0}],          
+        [{"node": "7B. Mensaje Intención No Reconocida", "type": "main", "index": 0}] 
+      ]
+    },
+    "6B.1 Construir Query (Listar Pagos)": {"main": [[{"node": "6B.2 DB - Leer Pagos (Listar)", "type": "main", "index": 0}]]},
+    "6B.2 DB - Leer Pagos (Listar)": {"main": [[{"node": "6B.3 Generar Tabla Texto (Listar Pagos)", "type": "main", "index": 0}]]},
+    "6B.3 Generar Tabla Texto (Listar Pagos)": {"main": [[{"node": "Merge All Response Paths", "type": "main", "index": 5}]]},
+    
+    "6C.1 Construir Query (Balance)": {"main": [[{"node": "6C.2 DB - Calcular Balance", "type": "main", "index": 0}]]},
+    "6C.2 DB - Calcular Balance": {"main": [[{"node": "6C.3 Formatear Balance", "type": "main", "index": 0}]]},
+    "6C.3 Formatear Balance": {"main": [[{"node": "Merge All Response Paths", "type": "main", "index": 6}]]},
+    
+    "6D.1 Construir Query (Gráfico)": {"main": [[{"node": "6D.1.1 IF Query Gráfico OK", "type": "main", "index": 0}]]},
+    "6D.1.1 IF Query Gráfico OK": { "main": [ [{"node": "6D.2 DB - Obtener Datos Gráfico", "type": "main", "index": 0}], [{"node": "Merge All Response Paths", "type": "main", "index": 7}] ]},
+    "6D.2 DB - Obtener Datos Gráfico": {"main": [[{"node": "6D.3 Formatear Datos QuickChart", "type": "main", "index": 0}]]},
+    "6D.3 Formatear Datos QuickChart": {"main": [[{"node": "6D.3.1 IF Chart Payload OK", "type": "main", "index": 0}]]},
+    "6D.3.1 IF Chart Payload OK": { "main": [ [{"node": "6D.4 Generar Gráfico (QuickChart)", "type": "main", "index": 0}], [{"node": "Merge All Response Paths", "type": "main", "index": 8}] ]},
+    "6D.4 Generar Gráfico (QuickChart)": {"main": [[{"node": "Merge All Response Paths", "type": "main", "index": 9}]]},
+    
+    "6E. Mensaje Saludo/Ayuda": {"main": [[{"node": "Merge All Response Paths", "type": "main", "index": 10}]]},
+    "7B. Mensaje Intención No Reconocida": {"main": [[{"node": "Merge All Response Paths", "type": "main", "index": 11}]]},
+
+    "Merge All Response Paths": {"main": [[{"node": "Prepare Final Response Data", "type": "main", "index": 0}]]},
+    "Prepare Final Response Data": {"main": [[{"node": "Switch Response Type (Final)", "type": "main", "index": 0}]]},
+    "Switch Response Type (Final)": {
+      "main": [
+        [{"node": "IF WhatsApp (Text)", "type": "main", "index": 0}], 
+        [{"node": "IF WhatsApp (Image)", "type": "main", "index": 0}],
+        [] 
+      ]
+    },
+    "IF WhatsApp (Text)": { "main": [ [{"node": "Send WhatsApp Text", "type": "main", "index": 0}], [{"node": "Send Telegram Text", "type": "main", "index": 0}] ]},
+    "IF WhatsApp (Image)": { "main": [ [{"node": "Send WhatsApp Image", "type": "main", "index": 0}], [{"node": "Send Telegram Image", "type": "main", "index": 0}] ]}
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "YOUR_N8N_INSTANCE_ID_REPLACEME"
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "", 
+    "timezone": "America/Caracas", 
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true
+  }
+}
